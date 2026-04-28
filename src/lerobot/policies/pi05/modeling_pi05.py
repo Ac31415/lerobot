@@ -1004,23 +1004,24 @@ class PI05Policy(PreTrainedPolicy):
                 print("Returning model without loading pretrained weights")
                 return model
 
-            # First, fix any key differences (see openpi model.py, _fix_pytorch_state_dict_keys)
+            # First, fix any key differences
             fixed_state_dict = model._fix_pytorch_state_dict_keys(original_state_dict, model.config)
 
-            # Then add "model." prefix for all keys that don't already have it
-            remapped_state_dict = {}
-            remap_count = 0
+            # Parallelize key remapping using dict comprehension (much faster than loop)
+            # This is still CPU-bound, but Python dict operations are optimized in C
+            remapped_state_dict = {
+                (f"model.{k}" if not k.startswith("model.") else k): v
+                for k, v in fixed_state_dict.items()
+            }
 
-            for key, value in fixed_state_dict.items():
-                if not key.startswith("model."):
-                    new_key = f"model.{key}"
-                    remapped_state_dict[new_key] = value
-                    remap_count += 1
-                else:
-                    remapped_state_dict[key] = value
-
+            remap_count = sum(1 for k in fixed_state_dict.keys() if not k.startswith("model."))
             if remap_count > 0:
                 print(f"Remapped {remap_count} state dict keys")
+
+            # Move to device immediately after remapping (before load_state_dict)
+            # This keeps GPU busy while other ops happen
+            remapped_state_dict = {k: v.to(model.config.device) if isinstance(v, torch.Tensor) else v 
+                                for k, v in remapped_state_dict.items()}
 
             # Load the remapped state dict into the model
             missing_keys, unexpected_keys = model.load_state_dict(remapped_state_dict, strict=strict)
