@@ -1014,6 +1014,8 @@ class PI05Policy(PreTrainedPolicy):
                 for k, v in fixed_state_dict.items()
             }
 
+            print(f"Original state dict had {len(original_state_dict)} keys")
+
             remap_count = sum(1 for k in fixed_state_dict.keys() if not k.startswith("model."))
             if remap_count > 0:
                 print(f"Remapped {remap_count} state dict keys")
