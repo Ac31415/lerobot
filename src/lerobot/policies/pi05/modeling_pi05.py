@@ -1001,11 +1001,28 @@ class PI05Policy(PreTrainedPolicy):
                 # print("✓ Loaded state dict from model.safetensors")
 
                 try:
-                    # Try loading directly to GPU (parallelizes transfer)
-                    original_state_dict = load_file(resolved_file, device=str(model.config.device))
-                    print(f"✓ Loaded state dict directly to {model.config.device}")
-                except TypeError:
-                    # Fallback for older safetensors
+                    import concurrent.futures
+                    from safetensors import safe_open
+                    
+                    device_str = str(model.config.device)
+                    original_state_dict = {}
+                    
+                    with safe_open(resolved_file, framework="pt", device=device_str) as f:
+                        keys = f.keys()
+                        
+                        def load_key(k):
+                            return k, f.get_tensor(k)
+                            
+                        # Use ThreadPoolExecutor to load tensors in parallel
+                        # This releases GIL during I/O and PCIe transfer, using multiple cores
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=min(32, len(keys))) as executor:
+                            for k, v in executor.map(load_key, keys):
+                                original_state_dict[k] = v
+                                
+                    print(f"✓ Loaded state dict directly to {device_str} in parallel")
+                except Exception as e:
+                    print(f"Parallel load failed ({e}), falling back...")
+                    from safetensors.torch import load_file
                     original_state_dict = load_file(resolved_file)
                     original_state_dict = {k: v.to(model.config.device) for k, v in original_state_dict.items()}
 
