@@ -1000,57 +1000,46 @@ class PI05Policy(PreTrainedPolicy):
                 # original_state_dict = load_file(resolved_file)
                 # print("✓ Loaded state dict from model.safetensors")
 
-                try:
-                    import concurrent.futures
-                    from safetensors import safe_open
-                    
-                    device_str = str(model.config.device)
-                    original_state_dict = {}
-                    
-                    with safe_open(resolved_file, framework="pt", device=device_str) as f:
-                        keys = f.keys()
-                        
-                        def load_key(k):
-                            return k, f.get_tensor(k)
-                            
-                        # Use ThreadPoolExecutor to load tensors in parallel
-                        # This releases GIL during I/O and PCIe transfer, using multiple cores
-                        with concurrent.futures.ThreadPoolExecutor(max_workers=min(32, len(keys))) as executor:
-                            for k, v in executor.map(load_key, keys):
-                                original_state_dict[k] = v
-                                
-                    print(f"✓ Loaded state dict directly to {device_str} in parallel")
-                except Exception as e:
-                    print(f"Parallel load failed ({e}), falling back...")
-                    from safetensors.torch import load_file
-                    original_state_dict = load_file(resolved_file)
-                    original_state_dict = {k: v.to(model.config.device) for k, v in original_state_dict.items()}
+                from safetensors.torch import load_file
+
+                # Load to CPU memory first cleanly (instantly via mmap)
+                original_state_dict = load_file(resolved_file, device="cpu")
+                print("✓ Fast-loaded state dict from model.safetensors via CPU mmap")
 
             except Exception as e:
                 print(f"Could not load state dict from remote files: {e}")
                 print("Returning model without loading pretrained weights")
                 return model
 
-            # First, fix any key differences (see openpi model.py, _fix_pytorch_state_dict_keys)
+            # First, fix any key differences
             fixed_state_dict = model._fix_pytorch_state_dict_keys(original_state_dict, model.config)
 
-            # Then add "model." prefix for all keys that don't already have it
-            remapped_state_dict = {}
-            remap_count = 0
-
-            for key, value in fixed_state_dict.items():
-                if not key.startswith("model."):
-                    new_key = f"model.{key}"
-                    remapped_state_dict[new_key] = value
-                    remap_count += 1
-                else:
-                    remapped_state_dict[key] = value
+            # Fast dict comprehension for key remapping
+            remapped_state_dict = {
+                (f"model.{k}" if not k.startswith("model.") else k): v
+                for k, v in fixed_state_dict.items()
+            }
+            
+            remap_count = sum(1 for k in fixed_state_dict.keys() if not k.startswith("model."))
 
             if remap_count > 0:
                 print(f"Remapped {remap_count} state dict keys")
 
-            # Load the remapped state dict into the model
-            missing_keys, unexpected_keys = model.load_state_dict(remapped_state_dict, strict=strict)
+            import torch
+            device_str = str(model.config.device) if hasattr(model.config, 'device') and model.config.device else ("cuda" if torch.cuda.is_available() else "cpu")
+            print(f"Transferring model state directly to {device_str}...")
+            
+            # Move the model architecture to target device
+            model.to(device_str)
+            
+            # Non-blocking transfer to GPU optimizes PCIe bandwidth fully with no CPU stalling
+            gpu_state_dict = {k: v.to(device_str, non_blocking=True) for k, v in remapped_state_dict.items()}
+
+            try:
+                # 'assign=True' is instant and zero-copy for PyTorch 2.1+, preventing iteration slowdowns
+                missing_keys, unexpected_keys = model.load_state_dict(gpu_state_dict, strict=strict, assign=True)
+            except TypeError:
+                missing_keys, unexpected_keys = model.load_state_dict(gpu_state_dict, strict=strict)
 
             if missing_keys:
                 print(f"Missing keys when loading state dict: {len(missing_keys)} keys")
