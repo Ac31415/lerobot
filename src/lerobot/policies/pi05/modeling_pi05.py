@@ -1000,46 +1000,64 @@ class PI05Policy(PreTrainedPolicy):
                 # original_state_dict = load_file(resolved_file)
                 # print("✓ Loaded state dict from model.safetensors")
 
-                from safetensors.torch import load_file
+            import torch
+            from safetensors import safe_open
 
-                # Load to CPU memory first cleanly (instantly via mmap)
-                original_state_dict = load_file(resolved_file, device="cpu")
-                print("✓ Fast-loaded state dict from model.safetensors via CPU mmap")
+            device_str = str(model.config.device) if hasattr(model.config, 'device') and model.config.device else ("cuda" if torch.cuda.is_available() else "cpu")
+            model.to(device_str)
+            print(f"Loading state dict directly into {device_str} from {resolved_file}")
 
-            except Exception as e:
-                print(f"Could not load state dict from remote files: {e}")
-                print("Returning model without loading pretrained weights")
-                return model
+            # Get model state dict for direct in-place copy
+            model_state_dict = model.state_dict()
+            missing_keys = set(model_state_dict.keys())
+            unexpected_keys = set()
+            remap_count = 0
 
-            # First, fix any key differences
-            fixed_state_dict = model._fix_pytorch_state_dict_keys(original_state_dict, model.config)
+            with safe_open(resolved_file, framework="pt", device=device_str) as f:
+                for key in f.keys():
+                    # Apply specific key fixes
+                    new_key = key
+                    import re
 
-            # Fast dict comprehension for key remapping
-            remapped_state_dict = {
-                (f"model.{k}" if not k.startswith("model.") else k): v
-                for k, v in fixed_state_dict.items()
-            }
-            
-            remap_count = sum(1 for k in fixed_state_dict.keys() if not k.startswith("model."))
+                    if re.match(r"paligemma_with_expert\.gemma_expert\.model\.layers\.\d+\.(input_layernorm|post_attention_layernorm)\.weight", key):
+                        expert_uses_adarms = getattr(model.model.paligemma_with_expert.gemma_expert.config, "use_adarms", False)
+                        if expert_uses_adarms:
+                            continue
+
+                    if re.match(r"paligemma_with_expert\.gemma_expert\.model\.norm\.weight", key):
+                        expert_uses_adarms = getattr(model.model.paligemma_with_expert.gemma_expert.config, "use_adarms", False)
+                        if expert_uses_adarms:
+                            continue
+
+                    if key.startswith("action_time_mlp_in."):
+                        new_key = key.replace("action_time_mlp_in.", "time_mlp_in.")
+                    elif key.startswith("action_time_mlp_out."):
+                        new_key = key.replace("action_time_mlp_out.", "time_mlp_out.")
+                    
+                    if key.startswith("state_proj."):
+                        continue
+
+                    if key == "model.paligemma_with_expert.paligemma.lm_head.weight" or key == "paligemma_with_expert.paligemma.lm_head.weight":
+                        new_key = "model.paligemma_with_expert.paligemma.model.language_model.embed_tokens.weight"
+
+                    # Add "model." prefix if needed
+                    if not new_key.startswith("model."):
+                        new_key = f"model.{new_key}"
+                        remap_count += 1
+
+                    if new_key in model_state_dict:
+                        # Directly load to device and copy in-place, avoiding CPU memory spikes
+                        tensor = f.get_tensor(key)
+                        model_state_dict[new_key].copy_(tensor)
+                        missing_keys.discard(new_key)
+                    else:
+                        unexpected_keys.add(new_key)
+
+            missing_keys = list(missing_keys)
+            unexpected_keys = list(unexpected_keys)
 
             if remap_count > 0:
                 print(f"Remapped {remap_count} state dict keys")
-
-            import torch
-            device_str = str(model.config.device) if hasattr(model.config, 'device') and model.config.device else ("cuda" if torch.cuda.is_available() else "cpu")
-            print(f"Transferring model state directly to {device_str}...")
-            
-            # Move the model architecture to target device
-            model.to(device_str)
-            
-            # Non-blocking transfer to GPU optimizes PCIe bandwidth fully with no CPU stalling
-            gpu_state_dict = {k: v.to(device_str, non_blocking=True) for k, v in remapped_state_dict.items()}
-
-            try:
-                # 'assign=True' is instant and zero-copy for PyTorch 2.1+, preventing iteration slowdowns
-                missing_keys, unexpected_keys = model.load_state_dict(gpu_state_dict, strict=strict, assign=True)
-            except TypeError:
-                missing_keys, unexpected_keys = model.load_state_dict(gpu_state_dict, strict=strict)
 
             if missing_keys:
                 print(f"Missing keys when loading state dict: {len(missing_keys)} keys")
