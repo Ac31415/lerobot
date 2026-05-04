@@ -1,0 +1,20 @@
+cd ~/ws_aic_caai/src/aic
+cd oculus_reader/
+pixi run python3 oculus_reader/viz_transforms.py
+
+
+
+
+
+cd ws_aic_caai/src/aic/
+export DBX_CONTAINER_MANAGER=docker
+distrobox enter -r aic_eval
+/entrypoint.sh spawn_task_board:=true     task_board_x:=0.3 task_board_y:=-0.1 task_board_z:=1.2     task_board_roll:=0.0 task_board_pitch:=0.0 task_board_yaw:=0.785     sfp_mount_rail_0_present:=true sfp_mount_rail_0_translation:=-0.08     sc_mount_rail_0_present:=true sc_mount_rail_0_translation:=-0.09     nic_card_mount_0_present:=true nic_card_mount_0_translation:=0.005     sc_port_0_present:=true sc_port_0_translation:=-0.04     spawn_cable:=true cable_type:=sfp_sc_cable attach_cable_to_gripper:=true     ground_truth:=true start_aic_engine:=false
+
+
+
+
+
+
+cd ws_aic_caai/src/aic/
+pixi run lerobot-record         --robot.type=aic_controller --robot.id=aic         --teleop.type=aic_oculus   --teleop.id=aic         --robot.teleop_target_mode=cartesian         --robot.cartesian_command_mode=position         --teleop.cartesian_command_mode=position         --robot.teleop_frame_id=base_link         --dataset.repo_id=caai-aic/test-dataset          --dataset.single_task="insert cable"         --dataset.push_to_hub=false         --play_sounds=false         --display_data=true 
